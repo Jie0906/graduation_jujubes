@@ -1,0 +1,18 @@
+2.2983506321907043 Test loss (%)
+99.80977773666382 Test accuracy (%)
+
+93.22483138179109 Kappa accuracy (%)
+99.80977977635165 Overall accuracy (%)
+94.71964932698576 Average accuracy (%)
+
+              precision    recall  f1-score   support
+
+        good       1.00      1.00      1.00    264646
+         bad       0.98      0.89      0.93      3990
+
+    accuracy                           1.00    268636
+   macro avg       0.99      0.95      0.97    268636
+weighted avg       1.00      1.00      1.00    268636
+
+[[264555     91]
+ [   420   3570]]
