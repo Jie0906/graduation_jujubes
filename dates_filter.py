@@ -40,6 +40,51 @@ def calc_K_u(HIM):
     except:
         print('An error occurred in calc_K_u()')
         
+        
+        
+def tcimf(HIM, d, no_d):
+    '''
+    Target-Constrained Interference-Minimized Filter
+    
+    param HIM: hyperspectral imaging, type is 3d-array
+    param d: desired target d (Desired Signature), type is 2d-array, size is [band num, point num], for example: [224, 1], [224, 3]
+    param no_d: undesired target, type is 2d-array, size is [band num, point num], for example: [224, 1], [224, 3]
+    '''
+    r = np.transpose(np.reshape(HIM, [-1, HIM.shape[2]]))
+    result = np.zeros([HIM.shape[0]*HIM.shape[1], 1])
+    DU = np.hstack(([d, no_d]))
+    d_count = d.shape[1]
+    no_d_count = no_d.shape[1]
+    DUtw = np.zeros([d_count + no_d_count, 1])
+    DUtw[0: d_count] = 1
+    R = (1/HIM.shape[0]*HIM.shape[1])*np.dot(r, np.transpose(r))
+    try:
+        Rinv = np.linalg.inv(R)
+    except:
+        Rinv = np.linalg.pinv(R)
+    x = np.dot(np.dot(np.transpose(r), Rinv), DU)
+    y = np.dot(np.dot(np.transpose(DU), Rinv), DU)
+    y = np.linalg.inv(y)
+    result = np.dot(np.dot(x, y), DUtw)  
+    result = np.reshape(result, HIM.shape[:-1])
+    return result
+
+
+def osp(HIM, d, no_d):
+    '''
+    Orthogonal Subspace Projection
+    
+    param HIM: hyperspectral imaging, type is 3d-array
+    param d: desired target d (Desired Signature), type is 2d-array, size is [band num, 1], for example: [224, 1]
+    param no_d: undesired target, type is 2d-array, size is [band num, point num], for example: [224, 1], [224, 3]
+    '''
+    r = np.transpose(np.reshape(HIM, [-1, HIM.shape[2]]))
+    I = np.eye(HIM.shape[2]) 
+    P = I - (no_d@np.linalg.inv( (no_d.T)@no_d ))@(no_d.T)
+    x = (d.T)@P@r
+    result = np.reshape(x, HIM.shape[:-1])
+    return result
+        
 def hcem(HIM, d, max_it = 100, λ = 200, e = 1e-6):
     '''
     Hierarchical Constrained Energy Minimization
