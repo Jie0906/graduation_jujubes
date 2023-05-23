@@ -24,8 +24,16 @@ from sklearn.metrics import confusion_matrix, accuracy_score, classification_rep
 from operator import truediv
 from tensorflow.keras.optimizers import Adam
 from keras.preprocessing.image import ImageDataGenerator
-from sklearn.model_selection import KFold
+from sklearn.model_selection import KFold, GridSearchCV
 from keras.utils.np_utils import to_categorical
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis as LDA
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import accuracy_score
+from sklearn.neighbors import KNeighborsClassifier
+from skimage import exposure
+import joblib
+from sklearn.decomposition import IncrementalPCA
+from concurrent.futures import ThreadPoolExecutor, as_completed
 #%% 
 # filename_good =f'C:/Users/user/Desktop/YuJie/dates_data/0204蜜棗/一級/dates1_1_RT'  
 # img_good = spectral.envi.open(filename_good + '.hdr').asarray()
@@ -48,47 +56,33 @@ img = date_good5[..., false_color_bands]
 plt.Figure()
 plt.imshow(img)
 
+
 #%% remove_background (svc)
+#自適應直方圖均衡化
+def apply_adaptive_histogram_equalization(image):
+    enhanced_image = np.empty_like(image)
+    for i in range(image.shape[2]):
+        single_channel = image[:, :, i]
+        single_channel_uint16 = (single_channel * 65535).astype(np.uint16)
+        enhanced_channel_uint16 = exposure.equalize_adapthist(single_channel_uint16, clip_limit=0.03)
+        enhanced_image[:, :, i] = (enhanced_channel_uint16 / 65535).astype(image.dtype)
+    return enhanced_image
 
-pick_point = []
-
-filename ='dates4_4_RT'  
-dates = spectral.envi.open(filename+'.hdr').asarray()
-select_bnands = [20,65,100]
-
-false_color_bands = np.array(select_bnands)
-img = dates[..., false_color_bands]
-pick_ans = np.array([1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]) #20個非背景 25個背景
-plt.Figure()
-plt.imshow(img)
-pick_temp = plt.ginput(45,show_clicks=True, timeout = 300)
-plt.show()
-
-for i in range(len(pick_temp)):
-    pick_point.append(dates[int(pick_temp[i][1]),int(pick_temp[i][0]),:])
-    
-plt.close() 
-
-clf = make_pipeline(StandardScaler(), SVC(gamma='auto'))
-clf.fit(pick_point, pick_ans)
-dates_svc_sample = clf.predict(dates.reshape([-1,dates.shape[2]]))
-plt.Figure()
-plt.imshow(np.reshape(dates_svc_sample,([dates.shape[0],dates.shape[1]])))
-
-#%%
 # 載入高光譜數據
 filename = 'dates4_4_RT'
 dates = spectral.envi.open(filename+'.hdr').asarray()
 
+#dates_enhanced = apply_adaptive_histogram_equalization(dates)
+
 # 設定選取的波段和對應的類別
-select_bnands = [20, 65, 100]
+select_bnands = [20, 70, 100]
 false_color_bands = np.array(select_bnands)
-pick_ans = np.array([1]*25 + [0]*25)
+pick_ans = np.array([1]*30 + [0]*30)
 
 # 選取樣本點
 plt.Figure()
 plt.imshow(dates[..., false_color_bands])
-pick_temp = plt.ginput(50, show_clicks=True, timeout=300)
+pick_temp = plt.ginput(60, show_clicks=True, timeout=300)
 plt.show()
 
 # 儲存樣本點
@@ -108,9 +102,9 @@ plt.Figure()
 plt.imshow(np.reshape(dates_svc_sample, [dates.shape[0], dates.shape[1]]))
 
 # 儲存模型
-with open('remove_background_svc_model.pkl', 'wb') as f:
+with open('remove_background_svc_model2.pkl', 'wb') as f:
     pickle.dump(clf, f)
-#%%
+#%% roi -> pca
 
 def process_images(file_path, count, img_label, clf, pca, n_components, img_key, img_value):
     for i in range(count):
@@ -151,115 +145,146 @@ process_images('C:/Users/user/Desktop/YuJie/dates_data/0216蜜棗/四級/dates4_
 '''save npy'''
 np.save('img_4class_pca10.npy',img_key)
 np.save('ans_4class_pca10.npy', img_value)
-#%% roi -> pca
+#%% roi -> pca -> lda
 
-# 讀取模型
-with open('remove_background_svc_model.pkl', 'rb') as f:
+def plot_pca_waveforms(pca_components, n_components):
+    plt.figure(figsize=(12, 6))
+    for i in range(n_components):
+        plt.plot(pca_components[i], label=f'PC{i+1}')
+    plt.xlabel('Spectral Bands')
+    plt.ylabel('PCA Component')
+    plt.title('PCA Waveforms')
+    plt.legend()
+    plt.show()
+
+def process_images(file_path, count, img_label, clf, img_key, img_value):
+    for i in range(count):
+        '''load file'''
+        filename = file_path.format(i + 1)
+        img = spectral.envi.open(filename + '.hdr').asarray()
+
+        '''svc'''
+        img_svc = clf.predict(img.reshape([-1, img.shape[2]]))
+        img_svc = np.reshape(img_svc, ([img.shape[0], img.shape[1]]))
+
+        '''roi'''
+        img_roi = dates_roi.test_peanut_roi(img, img_svc)
+
+        for j in range(len(img_roi)):
+            '''resize'''
+            img_roi[j] = cv2.resize(img_roi[j], (200, 200))
+            print("img_roi shape:", img_roi[j].shape)
+            img_key.append(img_roi[j])
+            img_value.append(img_label)
+            
+start_time = time.time()
+with open('remove_background_svc_model2.pkl', 'rb') as f:
     clf = pickle.load(f)
-    
-dates_roi = peanut()
-pca = PCA(n_components=30)
 
-img_good_svc = []
-img_good_roi = []
-img_good_pca = []
-img_crack_svc = []
-img_crack_roi = []
-img_crack_pca = []
-img_anthrax_svc = []
-img_anthrax_roi = []
-img_anthrax_pca = []
-img_overripe_svc = []
-img_overripe_roi = []
-img_overripe_pca = []
+dates_roi = peanut()
 img_key = []
 img_value = []
 
-for i in range(25):
-    '''load file'''
-    filename =f'C:/Users/user/Desktop/YuJie/dates_data/0204蜜棗/一級/dates1_{i+1}_RT'  
-    img_good = spectral.envi.open(filename + '.hdr').asarray()
-      
-    '''svc'''
-    img_good_svc = clf.predict(img_good.reshape([-1,img_good.shape[2]]))
-    img_good_svc = np.reshape(img_good_svc,([img_good.shape[0],img_good.shape[1]]))
-    
-    '''roi'''
-    img_good_roi = dates_roi.test_peanut_roi(img_good, img_good_svc)
-    
-    for j in range(len(img_good_roi)):
-        '''pca'''
-        img_good_roi[j] = cv2.resize(img_good_roi[j], (200,200)) 
-        img_good_pca = pca.fit_transform(np.reshape(img_good_roi[j],(img_good_roi[j].shape[0]*img_good_roi[j].shape[1],-1)))
-        img_good_pca= np.reshape(img_good_pca,(200, 200, 30))
-        
-        img_key.append(img_good_pca)
-        img_value.append(0)
+process_images('C:/Users/user/Desktop/YuJie/dates_data/0204蜜棗/一級/dates1_{}_RT', 25, 0, clf, img_key, img_value) #正常
+process_images('C:/Users/user/Desktop/YuJie/dates_data/0204蜜棗/二級/dates2_{}_RT', 18, 1, clf, img_key, img_value) #裂紋
+process_images('C:/Users/user/Desktop/YuJie/dates_data/0306蜜棗/dates3_{}_RT', 20, 2, clf, img_key, img_value) #腐敗
+process_images('C:/Users/user/Desktop/YuJie/dates_data/0216蜜棗/四級/dates4_{}_RT', 15, 3, clf, img_key, img_value) #炭砠
 
-for i in range(18):
-    '''load file'''
-    filename =f'C:/Users/user/Desktop/YuJie/dates_data/0204蜜棗/二級/dates2_{i+1}_RT'  
-    img_crack = spectral.envi.open(filename + '.hdr').asarray()
-    '''svc'''
-    img_crack_svc = clf.predict(img_crack.reshape([-1,img_crack.shape[2]]))
-    img_crack_svc = np.reshape(img_crack_svc,([img_crack.shape[0],img_crack.shape[1]]))
-    '''roi'''
-    img_crack_roi = dates_roi.test_peanut_roi(img_crack, img_crack_svc)
-    
-    for j in range(len(img_crack_roi)):
-        '''pca'''
-        img_crack_roi[j] = cv2.resize(img_crack_roi[j], (200,200))
-        img_crack_pca = pca.fit_transform(np.reshape(img_crack_roi[j],(img_crack_roi[j].shape[0]*img_crack_roi[j].shape[1],-1)))
-        img_crack_pca= np.reshape(img_crack_pca,(200,200,30))
-        
-        img_key.append(img_crack_pca)
-        img_value.append(1)
-
-
-for i in range(15):
-    '''load file'''
-    filename =f'C:/Users/user/Desktop/YuJie/dates_data/0216蜜棗/四級/dates4_{i+1}_RT'  
-    img_anthrax = spectral.envi.open(filename + '.hdr').asarray()
-    '''svc'''
-    img_anthrax_svc = clf.predict(img_anthrax.reshape([-1,img_anthrax.shape[2]]))
-    img_anthrax_svc = np.reshape(img_anthrax_svc,([img_anthrax.shape[0],img_anthrax.shape[1]]))
-    '''roi'''
-    img_anthrax_roi = dates_roi.test_peanut_roi(img_anthrax, img_anthrax_svc)
-    
-    for j in range(len(img_anthrax_roi)):
-        '''pca'''
-        img_anthrax_roi[j] = cv2.resize(img_anthrax_roi[j], (200,200))
-        img_anthrax_pca = pca.fit_transform(np.reshape(img_anthrax_roi[j],(img_anthrax_roi[j].shape[0]*img_anthrax_roi[j].shape[1],-1)))
-        img_anthrax_pca= np.reshape(img_anthrax_pca,(200,200,30))
-        
-        img_key.append(img_anthrax_pca)
-        img_value.append(2)
-        
-for i in range(20):
-    '''load file'''
-    filename =f'C:/Users/user/Desktop/YuJie/dates_data/0306蜜棗/dates3_{i+1}_RT'  
-    img_overripe = spectral.envi.open(filename + '.hdr').asarray()
-    '''svc'''
-    img_overripe_svc = clf.predict(img_overripe.reshape([-1,img_overripe.shape[2]]))
-    img_overripe_svc = np.reshape(img_overripe_svc,([img_overripe.shape[0],img_overripe.shape[1]]))
-    '''roi'''
-    img_overripe_roi = dates_roi.test_peanut_roi(img_overripe, img_overripe_svc)
-    
-    for j in range(len(img_anthrax_roi)):
-        '''pca'''
-        img_overripe_roi[j] = cv2.resize(img_overripe_roi[j], (200,200))
-        img_overripe_pca = pca.fit_transform(np.reshape(img_overripe_roi[j],(img_overripe_roi[j].shape[0]*img_overripe_roi[j].shape[1],-1)))
-        img_overripe_pca= np.reshape(img_overripe_pca,(200,200,30))
-        
-        img_key.append(img_overripe_pca)
-        img_value.append(3)
-        
+img_key = np.array(img_key)
 img_value = np.array(img_value)
 
+'''PCA'''
+pca_n_components = 60
+pca = PCA(n_components=pca_n_components)
+img_pca = pca.fit_transform(img_key.reshape(img_key.shape[0], -1))
+print(f'Selected PCA bands: {list(range(1, pca_n_components+1))}')
+plot_pca_waveforms(pca.components_, pca_n_components)
+
+'''LDA'''
+lda_n_components = 3
+lda = LDA(n_components=lda_n_components)
+img_lda = lda.fit_transform(img_pca, img_value)
 
 '''save npy'''
-np.save('img_4class_pca30.npy',img_key)
-np.save('ans_4class_pca30.npy', img_value)
+np.save('img_4class_pca60_lda3.npy', img_lda)
+np.save('ans_4class_pca60_lda3.npy', img_value)
+
+end_time = time.time()
+print('前處理時間：', end_time - start_time, '秒')
+
+
+
+#%% roi -> lda
+
+def process_images(file_path, count, img_label, clf, img_key, img_value):
+    for i in range(count):
+        '''load file'''
+        filename = file_path.format(i + 1)
+        img = spectral.envi.open(filename + '.hdr').asarray()
+
+        '''svc'''
+        img_svc = clf.predict(img.reshape([-1, img.shape[2]]))
+        img_svc = np.reshape(img_svc, ([img.shape[0], img.shape[1]]))
+
+        '''roi'''
+        img_roi = dates_roi.test_peanut_roi(img, img_svc)
+
+        for j in range(len(img_roi)):
+            '''resize'''
+            img_roi[j] = cv2.resize(img_roi[j], (200, 200))
+            print("img_roi shape:", img_roi[j].shape)
+            img_key.append(img_roi[j])
+            img_value.append(img_label)
+
+start_time = time.time()
+with open('remove_background_svc_model2.pkl', 'rb') as f:
+    clf = pickle.load(f)
+
+dates_roi = peanut()
+img_key = []
+img_value = []
+
+process_images('C:/Users/user/Desktop/YuJie/dates_data/0204蜜棗/一級/dates1_{}_RT', 25, 0, clf, img_key, img_value) #正常
+process_images('C:/Users/user/Desktop/YuJie/dates_data/0204蜜棗/二級/dates2_{}_RT', 18, 1, clf, img_key, img_value) #裂紋
+process_images('C:/Users/user/Desktop/YuJie/dates_data/0306蜜棗/dates3_{}_RT', 20, 2, clf, img_key, img_value) #腐敗
+process_images('C:/Users/user/Desktop/YuJie/dates_data/0216蜜棗/四級/dates4_{}_RT', 15, 3, clf, img_key, img_value) #炭砠
+
+img_key = np.array(img_key)
+img_value = np.array(img_value)
+
+'''LDA'''
+lda_n_components = 3
+# 初始化 IncrementalPCA
+ipca = IncrementalPCA(n_components=lda_n_components)
+
+# 將資料集分成5個part
+batches = np.array_split(img_key.reshape(img_key.shape[0], -1), 5)
+
+# 分批次訓練
+for batch in batches:
+    ipca.partial_fit(batch)
+
+# 使用訓練好的 IncrementalPCA 對 img_key 進行降维
+img_ipca = ipca.transform(img_key.reshape(img_key.shape[0], -1))
+
+# 使用 LDA 進行降维
+lda = LDA(n_components=lda_n_components)
+img_lda = lda.fit_transform(img_ipca, img_value)
+
+np.save('img_4class_lda.npy', img_lda)
+np.save('ans_4class_lda.npy', img_value)
+
+# lda = LDA(n_components=lda_n_components)
+# img_lda = lda.fit_transform(img_key.reshape(img_key.shape[0], -1), img_value)
+
+# '''save npy'''
+# np.save('img_4class_lda.npy', img_lda)
+# np.save('ans_4class_lda.npy', img_value)
+
+end_time = time.time()
+print('前處理時間：', end_time - start_time, '秒')
+
+
 #%% model try1 
 
 model = Sequential()
@@ -306,13 +331,13 @@ model.add(Dense(4, activation='softmax'))
 print(model.summary())
 
 #%% 2D CNN
-img = np.load('img_4class_pca10.npy',allow_pickle=True)
-ans = np.load('ans_4class_pca10.npy',allow_pickle=True)
+img = np.load('img_4class_pca30_lda.npy',allow_pickle=True)
+ans = np.load('ans_4class_pca30_lda.npy',allow_pickle=True)
 
-# 定義 KFold 分割器，將數據集分成 5 折
-kf = KFold(n_splits=6, shuffle=True, random_state=0)
+# 定義 KFold，將數據集分成 5 折
+kf = KFold(n_splits=5, shuffle=True, random_state=0)
 
-# 建立增強後的數據產生器
+# 建立增強後的數據
 datagen = ImageDataGenerator(
     rotation_range=20,
     width_shift_range=0.2,
@@ -322,7 +347,7 @@ datagen = ImageDataGenerator(
 
 # 定義模型
 model = Sequential()
-model.add(Conv2D(filters=16, kernel_size=3, input_shape=(200, 200, 10), activation='relu', padding='same'))
+model.add(Conv2D(filters=16, kernel_size=3, input_shape=(200, 200, 30), activation='relu', padding='same'))
 model.add(MaxPool2D(pool_size=2))
 model.add(Conv2D(filters=32, kernel_size=3, activation='relu', padding='same'))
 model.add(MaxPool2D(pool_size=2))
@@ -352,13 +377,13 @@ for train_idx, test_idx in kf.split(img, ans):
     print('Loss:', loss)
     print('Accuracy:', accuracy)
 
-model.save("dates_4class_model3_pca10.h5")
+model.save("dates_4class_model3_pca30_lda_1.h5")
 
 #predict
     
 dataset = "dates"
 # load best weights
-model.load_weights("dates_4class_model3_pca10.h5")
+model.load_weights("dates_4class_model3_pca30_lda_1.h5")
 # model_combined.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
 # Xtest_2D = Xtest_2D.reshape(-1, windowSize, windowSize, 16)
 # Xtest_3D = Xtest_3D.reshape(-1, windowSize, windowSize, 30)
@@ -417,7 +442,7 @@ def reports (origin_test, ans_test, name):
 classification, confusion, Test_loss, Test_accuracy, oa, each_acc, aa, kappa = reports(origin_test, ans_test, dataset)
 classification = str(classification)
 confusion = str(confusion)
-file_name = "dates_4class_model3_pca10.txt"
+file_name = "dates_4class_model3_pca30_lda_1.txt"
 
 with open(file_name, 'w') as x_file:
     x_file.write('{} Test loss (%)'.format(Test_loss))
@@ -435,40 +460,117 @@ with open(file_name, 'w') as x_file:
     x_file.write('{}'.format(classification))
     x_file.write('\n')
     x_file.write('{}'.format(confusion))
+#%% random forest
 
+# 加載數據
+img = np.load('img_4class_pca90_lda1.npy', allow_pickle=True)
+ans = np.load('ans_4class_pca90_lda1.npy', allow_pickle=True)
 
-#%%
-# ans = np_utils.to_categorical(ans)
-# origin_train, origin_test, ans_train, ans_test = train_test_split( img, ans, test_size=0.2, random_state=0)
+best_mean_accuracy = 0
+best_random_state = 0
+best_rf_model = None
 
+param_grid = {
+    'n_estimators': [100, 200, 300, 400],
+    'max_depth': [None, 10, 20, 30],
+    'min_samples_split': [2, 5, 10],
+    'min_samples_leaf': [1, 2, 4]
+}
 
-# model = Sequential()
-# model.add(Conv2D(filters=16, kernel_size=3, input_shape=(200, 200, 50), activation='relu', padding = 'same'))
-# model.add(MaxPool2D(pool_size=2))
-# model.add(Conv2D(filters=32, kernel_size=3, activation='relu', padding = 'same'))
-# model.add(MaxPool2D(pool_size=2))
-# model.add(Conv2D(filters=64, kernel_size=3, activation='relu', padding = 'same'))
-# model.add(MaxPool2D(pool_size=2))
-# model.add(Conv2DTranspose(filters=64, kernel_size=3,activation='relu', padding='same'))
-# model.add(GlobalAveragePooling2D())
-# model.add(Dense(256, activation='relu'))
-# model.add(Dense(128, activation='relu'))
-# model.add(Dense(64, activation='relu'))
-# model.add(Dense(16, activation='relu'))
-# model.add(Dense(3, activation='softmax'))
+use_grid_search = False  #  True 以使用網格搜索， False 則使用普通隨機森林
 
+for random_state in range(30):
+    kf = KFold(n_splits=5, shuffle=True, random_state=random_state)
+    total_accuracy = 0
+    
+    for train_idx, test_idx in kf.split(img, ans):
+        origin_train, origin_test = img[train_idx], img[test_idx]
+        ans_train, ans_test = ans[train_idx], ans[test_idx]
 
-# print(model.summary())
-# model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
-# start = time.time()
-# model.fit(origin_train, ans_train, epochs=1000, batch_size=100,validation_split = 0.05,verbose=1)
+        if use_grid_search:
+            rf_clf = RandomForestClassifier(random_state=0)
+            grid_search = GridSearchCV(rf_clf, param_grid, cv=5, scoring='accuracy', n_jobs=-1)
+            start_time = time.time()
+            grid_search.fit(origin_train, ans_train)
+            end_time = time.time()
+            best_rf_clf = grid_search.best_estimator_
+        else:
+            best_rf_clf = RandomForestClassifier(random_state=0)
+            start_time = time.time()
+            best_rf_clf.fit(origin_train, ans_train)
+            end_time = time.time()
 
-# loss, accuracy = model.evaluate(origin_test, ans_test)
-# print('Test:')
-# print('Loss:', loss)
-# print('Accuracy:', accuracy)
+        ans_pred = best_rf_clf.predict(origin_test)
 
-#save model
+        accuracy = accuracy_score(ans_test, ans_pred)
+        print('Test:')
+        print('Accuracy:', accuracy)
+        total_accuracy += accuracy
+
+    mean_accuracy = total_accuracy / 5
+    print('Mean accuracy for random state', random_state, ':', mean_accuracy)
+
+    if mean_accuracy > best_mean_accuracy:
+        best_mean_accuracy = mean_accuracy
+        best_random_state = random_state
+        best_rf_model = best_rf_clf
+
+    print('Prediction time:', end_time - start_time, 'seconds')
+
+print('Best random state:', best_random_state)
+print('Best mean accuracy:', best_mean_accuracy)
+
+joblib.dump(best_rf_model, 'best_pca90_lda1_rf_model.pkl')
+    
+#%% k-nn
+
+img = np.load('img_4class_pca90_lda1.npy', allow_pickle=True)
+ans = np.load('ans_4class_pca90_lda1.npy', allow_pickle=True)
+
+param_grid = {'n_neighbors': list(range(1, 31))}
+
+best_mean_accuracy = 0
+best_random_state = 0
+best_knn_model = None
+
+for random_state in range(10):  # 進行10次隨機迭代
+    kf = KFold(n_splits=5, shuffle=True, random_state=random_state)
+    total_accuracy = 0
+    
+    for train_idx, test_idx in kf.split(img, ans):
+        origin_train, origin_test = img[train_idx], img[test_idx]
+        ans_train, ans_test = ans[train_idx], ans[test_idx]
+
+        knn = KNeighborsClassifier()
+        grid_search = GridSearchCV(knn, param_grid, cv=6, scoring='accuracy')
+
+        start_time = time.time()
+        grid_search.fit(origin_train, ans_train)
+        end_time = time.time()
+
+        print("Best parameters found:", grid_search.best_params_)
+
+        ans_pred = grid_search.predict(origin_test)
+
+        accuracy = accuracy_score(ans_test, ans_pred)
+        print('Test:')
+        print('Accuracy:', accuracy)
+        print('Test time:', end_time - start_time, 'seconds')
+
+        total_accuracy += accuracy
+
+    mean_accuracy = total_accuracy / 5  # 計算平均交叉驗證準確率
+    print('Mean accuracy for random state', random_state, ':', mean_accuracy)
+
+    if mean_accuracy > best_mean_accuracy:
+        best_mean_accuracy = mean_accuracy
+        best_random_state = random_state
+        best_knn_model = grid_search.best_estimator_
+
+print('Best random state:', best_random_state)
+print('Best mean accuracy:', best_mean_accuracy)
+
+joblib.dump(best_knn_model, 'best_pca90_lda1_knn_model.pkl')
 #%% 3D CNN
 
 img = np.load('img.npy',allow_pickle=True)
