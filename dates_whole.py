@@ -27,7 +27,7 @@ from keras.preprocessing.image import ImageDataGenerator
 from sklearn.model_selection import KFold, GridSearchCV
 from keras.utils.np_utils import to_categorical
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis as LDA
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import RandomForestClassifier, VotingClassifier
 from sklearn.metrics import accuracy_score
 from sklearn.neighbors import KNeighborsClassifier
 from skimage import exposure
@@ -58,16 +58,6 @@ plt.imshow(img)
 
 
 #%% remove_background (svc)
-#自適應直方圖均衡化
-def apply_adaptive_histogram_equalization(image):
-    enhanced_image = np.empty_like(image)
-    for i in range(image.shape[2]):
-        single_channel = image[:, :, i]
-        single_channel_uint16 = (single_channel * 65535).astype(np.uint16)
-        enhanced_channel_uint16 = exposure.equalize_adapthist(single_channel_uint16, clip_limit=0.03)
-        enhanced_image[:, :, i] = (enhanced_channel_uint16 / 65535).astype(image.dtype)
-    return enhanced_image
-
 # 載入高光譜數據
 filename = 'dates4_4_RT'
 dates = spectral.envi.open(filename+'.hdr').asarray()
@@ -571,261 +561,73 @@ print('Best random state:', best_random_state)
 print('Best mean accuracy:', best_mean_accuracy)
 
 joblib.dump(best_knn_model, 'best_pca90_lda1_knn_model.pkl')
-#%% 3D CNN
 
-img = np.load('img.npy',allow_pickle=True)
-ans = np.load('ans.npy',allow_pickle=True)
+#%% 集成學習(random_forest、K-nn)
+img = np.load('img_4class_pca60_lda.npy', allow_pickle=True)
+ans = np.load('ans_4class_pca60_lda.npy', allow_pickle=True)
 
+best_mean_accuracy = 0
+best_random_state = 0
+best_voting_model = None
 
+param_grid = {
+    'n_estimators': [100, 200, 300, 400],
+    'max_depth': [None, 10, 20, 30],
+    'min_samples_split': [2, 5, 10],
+    'min_samples_leaf': [1, 2, 4]
+}
 
-img = np.reshape(img, (img.shape[0],img.shape[1],img.shape[2],img.shape[3],1))
+use_grid_search = False  #  True 以使用網格搜索， False 則使用普通隨機森林
 
-ans = np_utils.to_categorical(ans)
-origin_train, origin_test, ans_train, ans_test = train_test_split( img, ans, test_size=0.4, random_state=0) 
-
-model = Sequential()
-model.add(Conv3D(filters=16, kernel_size=3, input_shape=(200, 200, 50, 1), activation='relu'))
-model.add(MaxPool3D(pool_size=2))
-#model.add(Conv3DTranspose(filters=32, kernel_size=3,activation='relu', padding='same'))
-model.add(Flatten())
-model.add(Dense(64, activation='relu'))
-model.add(Dense(16, activation='relu'))
-model.add(Dense(3, activation='softmax'))
-
-
-
-print(model.summary())
-model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
-history = model.fit(origin_train, ans_train, epochs=1000, batch_size=100,validation_split = 0.05, verbose=1)
-
-def show_train_history(history):
-    plt.figure()
-    plt.subplot(121)
-    plt.plot(history.history["accuracy"])
-    plt.plot(history.history["val_accuracy"])
-    plt.title("Train History accuracy")
-    plt.xlabel("Epoch")
-    plt.ylabel("Loss & Accuracy")
-    plt.legend(["train accuracy", "val accuracy"], loc=2)
-    plt.subplot(122)    
-    plt.plot(history.history["loss"])
-    plt.plot(history.history["val_loss"])
-    plt.title("Train History loss")
-    plt.xlabel("Epoch")
-    plt.ylabel("Loss & Accuracy")
-    plt.legend(["train loss", "val loss"], loc=2)
-    plt.show()
-
-show_train_history(history)
-
-
-loss, accuracy = model.evaluate(origin_test, ans_test)
-print('Test:')
-print('Loss:', loss)
-print('Accuracy:', accuracy)
-
-#%% 2D+3D (並聯)
-img = np.load('img.npy',allow_pickle=True)
-ans = np.load('ans.npy',allow_pickle=True)
-
-origin_train_2D, origin_test_2D, ans_train_2D, ans_test_2D = train_test_split( img, ans, test_size=0.6, random_state=0)
-origin_train_3D, origin_test_3D, ans_train_3D, ans_test_3D = train_test_split( img, ans, test_size=0.6, random_state=0)
-
-ans_train = np_utils.to_categorical(ans_train_2D)
-ans_test = np_utils.to_categorical(ans_test_2D)
-
-in_2D = Input((150, 150, 30))
-model_2D = Conv2D(16, kernel_size=(3,3) , strides=(1,1), activation='relu', padding='valid')(in_2D)
-#model_2D = MaxPooling2D(pool_size=(3,3) , strides=(1,1))(model_2D)
-model_2D = Conv2D(32, kernel_size=(3,3), strides=(1,1), activation='relu', padding='valid')(model_2D)
-model_2D = MaxPooling2D(pool_size=(2,2) , strides=(1,1), padding='same')(model_2D)
-model_2D = Conv2D(64, kernel_size=(5,5), strides=(1,1), activation='relu', padding='valid')(model_2D)
-model_2D = Conv2DTranspose(64, kernel_size=(5,5) , strides=(1,1), activation='relu', padding='valid')(model_2D)
-model_2D = GlobalAveragePooling2D()(model_2D)
-
-
-#------------------------------3D-----------------------------------------
-in_3D = Input((150, 150, 30, 1))
-model_3D = Conv3D(8, kernel_size=(3,3,7), strides=(1,1,1), padding='same',activation='relu')(in_3D)
-model_3D = Conv3D(16, kernel_size=(3,3,5), strides=(1,1,1), padding='same',activation='relu')(model_3D)
-model_3D = MaxPooling3D(pool_size=(3,3,3) , strides=(1,1,1), padding='same')(model_3D)
-model_3D = Conv3D(32, kernel_size=(3,3,3), strides=(1,1,1),  padding='same', activation='relu')(model_3D)
-model_3D = GlobalAveragePooling3D()(model_3D)
-
-merged = Concatenate()([model_2D, model_3D])
-output = Dense(64, activation='relu')(merged)
-output = Dense(16, activation='relu')(output)
-output = Dense(3, activation='softmax')(output)
-
-model_combined = Model(inputs=[in_2D, in_3D], outputs=[output])
-adam = Adam(lr=0.001, decay=1e-06)
-start = time.time()
-model_combined.compile(loss='categorical_crossentropy', optimizer=adam, metrics=['accuracy'])
-model_combined.summary()
-history = model_combined.fit([origin_train_2D, origin_train_3D], ans_train, validation_split=0.05, epochs=1000, batch_size=30)
-print("Total training time: ", time.time() - start, "seconds")
-def show_train_history(history):
-    plt.figure()
-    plt.subplot(121)
-    plt.plot(history.history["accuracy"])
-    plt.plot(history.history["val_accuracy"])
-    plt.title("Train History accuracy")
-    plt.xlabel("Epoch")
-    plt.ylabel("Loss & Accuracy")
-    plt.legend(["train accuracy", "val accuracy"], loc=2)
-    plt.subplot(122)    
-    plt.plot(history.history["loss"])
-    plt.plot(history.history["val_loss"])
-    plt.title("Train History loss")
-    plt.xlabel("Epoch")
-    plt.ylabel("Loss & Accuracy")
-    plt.legend(["train loss", "val loss"], loc=2)
-    plt.show()
-
-show_train_history(history)
-print('Test:')
-print('Loss:', loss)
-print('Accuracy:', accuracy)
-
-#save model
-model.save("dates_try.h5")
-
-#predict
+for random_state in range(30):
+    kf = KFold(n_splits=5, shuffle=True, random_state=random_state)
+    total_accuracy = 0
     
-dataset = "dates"
-# load best weights
-model.load_weights("dates_try.h5")
-# model_combined.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
-# Xtest_2D = Xtest_2D.reshape(-1, windowSize, windowSize, 16)
-# Xtest_3D = Xtest_3D.reshape(-1, windowSize, windowSize, 30)
-# ytest = np_utils.to_categorical(ytest)
-Y_pred_test = model.predict(origin_test)
-y_pred_test = np.argmax(Y_pred_test, axis=1)
+    for train_idx, test_idx in kf.split(img, ans):
+        origin_train, origin_test = img[train_idx], img[test_idx]
+        ans_train, ans_test = ans[train_idx], ans[test_idx]
 
-classification = classification_report(np.argmax(ans_test, axis=1), y_pred_test)
-print(classification)
+        if use_grid_search:
+            rf_clf = RandomForestClassifier(random_state=0)
+            grid_search = GridSearchCV(rf_clf, param_grid, cv=5, scoring='accuracy', n_jobs=-1)
+            start_time = time.time()
+            grid_search.fit(origin_train, ans_train)
+            end_time = time.time()
+            best_rf_clf = grid_search.best_estimator_
+        else:
+            best_rf_clf = RandomForestClassifier(random_state=0)
+            best_knn_clf = KNeighborsClassifier(n_neighbors=5)
+            best_voting_clf = VotingClassifier(
+                estimators=[
+                    ('rf', best_rf_clf), 
+                    ('knn', best_knn_clf)
+                ],
+                voting='soft'
+            )
+            start_time = time.time()
+            best_voting_clf.fit(origin_train, ans_train)
+            end_time = time.time()
 
-def AA_andEachClassAccuracy(confusion_matrix):
-    counter = confusion_matrix.shape[0]
-    list_diag = np.diag(confusion_matrix)
-    list_raw_sum = np.sum(confusion_matrix, axis=1)
-    each_acc = np.nan_to_num(truediv(list_diag, list_raw_sum))
-    average_acc = np.mean(each_acc)
-    return each_acc, average_acc
-             
-def reports (origin_test, ans_test, name):
-    start = time.time()
-    Y_pred = model.predict(origin_test)
-    y_pred = np.argmax(Y_pred, axis=1)
-    end = time.time()
-    print(end - start)
-    if name == 'IP':
-        target_names = ['Alfalfa', 'Corn-notill', 'Corn-mintill', 'Corn'
-                        ,'Grass-pasture', 'Grass-trees', 'Grass-pasture-mowed', 
-                        'Hay-windrowed', 'Oats', 'Soybean-notill', 'Soybean-mintill',
-                        'Soybean-clean', 'Wheat', 'Woods', 'Buildings-Grass-Trees-Drives',
-                        'Stone-Steel-Towers']
-    elif name == 'SA':
-        target_names = ['Brocoli_green_weeds_1','Brocoli_green_weeds_2','Fallow','Fallow_rough_plow','Fallow_smooth',
-                        'Stubble','Celery','Grapes_untrained','Soil_vinyard_develop','Corn_senesced_green_weeds',
-                        'Lettuce_romaine_4wk','Lettuce_romaine_5wk','Lettuce_romaine_6wk','Lettuce_romaine_7wk',
-                        'Vinyard_untrained','Vinyard_vertical_trellis']
-    elif name == 'PU':
-        target_names = ['Asphalt','Meadows','Gravel','Trees', 'Painted metal sheets','Bare Soil','Bitumen',
-                        'Self-Blocking Bricks','Shadows']
-    elif name == 'peanut':
-        target_names = ['good','bad']
-        
-    elif name == 'dates':
-        target_names = ['good','crack', 'anthrax']
-    
-    classification = classification_report(np.argmax(ans_test, axis=1), y_pred, target_names=target_names)
-    oa = accuracy_score(np.argmax(ans_test, axis=1), y_pred)
-    confusion = confusion_matrix(np.argmax(ans_test, axis=1), y_pred)
-    each_acc, aa = AA_andEachClassAccuracy(confusion)
-    kappa = cohen_kappa_score(np.argmax(ans_test, axis=1), y_pred)
-    score = model.evaluate(origin_test, ans_test, batch_size=100)
-    Test_Loss =  score[0]*100
-    Test_accuracy = score[1]*100
-    return classification, confusion, Test_Loss, Test_accuracy, oa*100, each_acc*100, aa*100, kappa*100
+        ans_pred = best_voting_clf.predict(origin_test)
 
+        accuracy = accuracy_score(ans_test, ans_pred)
+        print('Test:')
+        print('Accuracy:', accuracy)
+        total_accuracy += accuracy
 
-classification, confusion, Test_loss, Test_accuracy, oa, each_acc, aa, kappa = reports(origin_test, ans_test, dataset)
-classification = str(classification)
-confusion = str(confusion)
-file_name = "dates_try.txt"
+    mean_accuracy = total_accuracy / 5
+    print('Mean accuracy for random state', random_state, ':', mean_accuracy)
 
-with open(file_name, 'w') as x_file:
-    x_file.write('{} Test loss (%)'.format(Test_loss))
-    x_file.write('\n')
-    x_file.write('{} Test accuracy (%)'.format(Test_accuracy))
-    x_file.write('\n')
-    x_file.write('\n')
-    x_file.write('{} Kappa accuracy (%)'.format(kappa))
-    x_file.write('\n')
-    x_file.write('{} Overall accuracy (%)'.format(oa))
-    x_file.write('\n')
-    x_file.write('{} Average accuracy (%)'.format(aa))
-    x_file.write('\n')
-    x_file.write('\n')
-    x_file.write('{}'.format(classification))
-    x_file.write('\n')
-    x_file.write('{}'.format(confusion))
-#%% 2D+3D (串聯)
-img = np.load('img.npy',allow_pickle=True)
-ans = np.load('ans.npy',allow_pickle=True)
+    if mean_accuracy > best_mean_accuracy:
+        best_mean_accuracy = mean_accuracy
+        best_random_state = random_state
+        best_voting_model = best_voting_clf
 
-origin_train_2D, origin_test_2D, ans_train_2D, ans_test_2D = train_test_split( img, ans, test_size=0.75, random_state=0)
+    print('Prediction time:', end_time - start_time, 'seconds')
 
-ans_train = np_utils.to_categorical(ans_train_2D)
-ans_test = np_utils.to_categorical(ans_test_2D)
+print('Best random state:', best_random_state)
+print('Best mean accuracy:', best_mean_accuracy)
 
-in_2D = Input((150, 150, 10))
-model_2D = Conv2D(16, kernel_size=(3,3) , strides=(1,1), activation='relu', padding='valid')(in_2D)
-#model_2D = MaxPooling2D(pool_size=(3,3) , strides=(1,1))(model_2D)
-model_2D = Conv2D(32, kernel_size=(3,3), strides=(1,1), activation='relu', padding='valid')(model_2D)
-model_2D = MaxPooling2D(pool_size=(2,2) , strides=(1,1), padding='same')(model_2D)
-model_2D = Conv2D(64, kernel_size=(5,5), strides=(1,1), activation='relu', padding='valid')(model_2D)
-model_2D = Conv2DTranspose(64, kernel_size=(5,5) , strides=(1,1), activation='relu', padding='valid')(model_2D)
-model_2D = model_2D[...,None]
+joblib.dump(best_voting_model, 'best_pca60_lda_voting_model1.pkl')
 
-#------------------------------3D-----------------------------------------
-model_3D = Conv3D(8, kernel_size=(3,3,7), strides=(1,1,1), padding='same',activation='relu')(model_2D)
-model_3D = Conv3D(16, kernel_size=(3,3,5), strides=(1,1,1), padding='same',activation='relu')(model_3D)
-model_3D = MaxPooling3D(pool_size=(3,3,3) , strides=(1,1,1), padding='same')(model_3D)
-model_3D = Conv3D(32, kernel_size=(3,3,3), strides=(1,1,1),  padding='same', activation='relu')(model_3D)
-model_3D = GlobalAveragePooling3D()(model_3D)
-
-output = Dense(64, activation='relu')(model_3D)
-output = Dense(16, activation='relu')(output)
-output = Dense(3, activation='softmax')(output)
-
-model_combined = Model(inputs=in_2D, outputs=[output])
-adam = Adam(lr=0.001, decay=1e-06)
-model_combined.compile(loss='categorical_crossentropy', optimizer=adam, metrics=['accuracy'])
-model_combined.summary()
-history = model_combined.fit(origin_train_2D, ans_train, validation_split=0.05, epochs=300, batch_size=100)
-print("Total training time: ", time.time() - start, "seconds")
-def show_train_history(history):
-    plt.figure()
-    plt.subplot(121)
-    plt.plot(history.history["accuracy"])
-    plt.plot(history.history["val_accuracy"])
-    plt.title("Train History accuracy")
-    plt.xlabel("Epoch")
-    plt.ylabel("Loss & Accuracy")
-    plt.legend(["train accuracy", "val accuracy"], loc=2)
-    plt.subplot(122)    
-    plt.plot(history.history["loss"])
-    plt.plot(history.history["val_loss"])
-    plt.title("Train History loss")
-    plt.xlabel("Epoch")
-    plt.ylabel("Loss & Accuracy")
-    plt.legend(["train loss", "val loss"], loc=2)
-    plt.show()
-
-show_train_history(history)
-print('Test:')
-print('Loss:', loss)
-print('Accuracy:', accuracy)
 
