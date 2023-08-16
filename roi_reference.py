@@ -25,7 +25,7 @@ def test_peanut_roi(img,mask):
         x = 2
         for region in measure.regionprops(label_image):      
             #忽略小區域
-            if region.area <1000:
+            if region.area <2000:
                 continue
             #ROI
             minr, minc, maxr, maxc = region.bbox      
@@ -73,7 +73,7 @@ pre = clf.predict(him.reshape(img.shape[0]*img.shape[1],img.shape[2]))
 for i in range(25):
 
     filename = f'C:/Users/hsu/Desktop/g/g/{i+1}_New-1'
-    img = envi.open(filename + '.hdr')
+    img = spectral.envi.open(filename + '.hdr')
     him = img.asarray()
     pre = pre.reshape(img.shape[0],img.shape[1])
     # plt.figure()

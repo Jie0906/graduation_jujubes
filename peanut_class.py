@@ -16,28 +16,25 @@ class peanut:
             peanut_coordinate = []
             img_la_overlay = []
             cleared = mask.copy()  #複製
-            
             segmentation.clear_border(cleared)
             label_image =measure.label(cleared)  #連續區域標記
             borders = np.logical_xor(mask, cleared) #異物
             label_image[borders] = -1
-            image_label_overlay =color.label2rgb(label_image, image=img) #不同標記用不同顏色顯示
+           
             x = 2
             for region in measure.regionprops(label_image):      
                 #忽略小區域
-                if region.area <2000:
+                if region.area <1000:
                     continue
                 #ROI
                 minr, minc, maxr, maxc = region.bbox      
                 peanut_roi.append(img[minr-x:maxr+x,minc-x:maxc+x,:])
                 peanut_coordinate.append(region.bbox)
                 
-                
-            img_la_overlay.append(image_label_overlay)
         except:
             print('ROI error')
         else:
-            return peanut_roi,peanut_coordinate,img_la_overlay
+            return peanut_roi
     
 ##############################################################################
 ##############################################################################
